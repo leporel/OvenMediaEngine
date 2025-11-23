@@ -70,6 +70,7 @@ void IceCandidate::Swap(IceCandidate &from) noexcept
 	std::swap(_rel_addr, from._rel_addr);
 	std::swap(_rel_port, from._rel_port);
 	std::swap(_extension_attributes, from._extension_attributes);
+	std::swap(_tcp_type, from._tcp_type);
 }
 
 bool IceCandidate::ParseFromString(const ov::String &candidate_string)
@@ -216,7 +217,26 @@ bool IceCandidate::ParseFromString(const ov::String &candidate_string)
 
 		ov::String &value = *iterator++;
 
-		temp_candidate._extension_attributes[key] = value;
+		// Handle tcptype attribute specially (RFC 6544)
+		if (key == "tcptype")
+		{
+			if (value == "active")
+			{
+				temp_candidate._tcp_type = TcpCandidateType::Active;
+			}
+			else if (value == "passive")
+			{
+				temp_candidate._tcp_type = TcpCandidateType::Passive;
+			}
+			else if (value == "so")
+			{
+				temp_candidate._tcp_type = TcpCandidateType::So;
+			}
+		}
+		else
+		{
+			temp_candidate._extension_attributes[key] = value;
+		}
 	}
 
 	Swap(temp_candidate);
@@ -373,7 +393,15 @@ void IceCandidate::RemoveAllExtensionAttributes()
 ov::String IceCandidate::GetCandidateString() const noexcept
 {
 	// candidate:0 1 UDP 50 192.168.0.183 10000 typ host generation 0
+	// For TCP: candidate:0 1 TCP 50 192.168.0.183 10000 typ host tcptype passive
 	ov::String result;
+
+	// For TCP Active candidates, use port 9 (discard) as per RFC 6544
+	int port = GetPort();
+	if (IsTcp() && _tcp_type == TcpCandidateType::Active)
+	{
+		port = 9;
+	}
 
 	result.Format(
 		// "candidate" ":" foundation SP component-id SP
@@ -392,7 +420,7 @@ ov::String IceCandidate::GetCandidateString() const noexcept
 		_transport.UpperCaseString().CStr(),
 		_priority,
 		GetConnectionAddress().CStr(),
-		GetPort(),
+		port,
 		_candidate_types.CStr());
 
 	if (_rel_addr.IsEmpty() == false)
@@ -409,6 +437,27 @@ ov::String IceCandidate::GetCandidateString() const noexcept
 		result.AppendFormat(" rport %d", _rel_port);
 	}
 
+	// Add tcptype attribute for TCP candidates (RFC 6544)
+	if (IsTcp())
+	{
+		switch (_tcp_type)
+		{
+			case TcpCandidateType::Active:
+				result.Append(" tcptype active");
+				break;
+			case TcpCandidateType::Passive:
+				result.Append(" tcptype passive");
+				break;
+			case TcpCandidateType::So:
+				result.Append(" tcptype so");
+				break;
+			default:
+				// Fallback to passive for server
+				result.Append(" tcptype passive");
+				break;
+		}
+	}
+
 	for (auto const &value : _extension_attributes)
 	{
 		// *(SP extension-att-name SP
@@ -422,4 +471,60 @@ ov::String IceCandidate::GetCandidateString() const noexcept
 ov::String IceCandidate::ToString() const noexcept
 {
 	return GetCandidateString();
+}
+
+TcpCandidateType IceCandidate::GetTcpType() const
+{
+	return _tcp_type;
+}
+
+void IceCandidate::SetTcpType(TcpCandidateType tcp_type)
+{
+	_tcp_type = tcp_type;
+}
+
+bool IceCandidate::IsTcp() const
+{
+	return _transport.UpperCaseString() == "TCP";
+}
+
+// Calculate priority according to RFC 5245
+// priority = (2^24) * (type preference) + (2^8) * (local preference) + (256 - component ID)
+uint32_t IceCandidate::CalculatePriority(uint32_t type_preference, uint32_t local_preference, uint32_t component_id)
+{
+	return (type_preference << 24) | ((local_preference & 0xFFFF) << 8) | (256 - component_id);
+}
+
+// Calculate priority for TCP candidates according to RFC 6544
+// For TCP candidates, local_preference incorporates direction preference
+uint32_t IceCandidate::CalculateTcpPriority(TcpCandidateType tcp_type, uint32_t local_preference, uint32_t component_id)
+{
+	// Type preference for TCP host candidates (slightly lower than UDP host = 126)
+	constexpr uint32_t TCP_HOST_TYPE_PREFERENCE = 125;
+
+	// Direction preference (0-7), higher is more preferred
+	// RFC 6544 suggests: active > passive > so
+	uint32_t direction_pref = 0;
+	switch (tcp_type)
+	{
+		case TcpCandidateType::Active:
+			direction_pref = 6;
+			break;
+		case TcpCandidateType::Passive:
+			direction_pref = 4;
+			break;
+		case TcpCandidateType::So:
+			direction_pref = 2;
+			break;
+		default:
+			direction_pref = 0;
+			break;
+	}
+
+	// local_preference = (2^13) * direction_pref + other_pref
+	// other_pref is scaled from original local_preference
+	uint32_t other_pref = local_preference & 0x1FFF;  // 13 bits
+	uint32_t adjusted_local_preference = (direction_pref << 13) | other_pref;
+
+	return CalculatePriority(TCP_HOST_TYPE_PREFERENCE, adjusted_local_preference, component_id);
 }

@@ -10,16 +10,27 @@
 //#define FIXED_TURN_CHANNEL_HEADER_SIZE	4
 #define MINIMUM_PACKET_HEADER_SIZE	4
 
-// It only demultiplexes the stream input to ICE/TCP. 
+// RFC 4571 framing header size (2-byte length prefix)
+#define RFC4571_HEADER_SIZE	2
+
+// It only demultiplexes the stream input to ICE/TCP.
 // Use identifier for packets that are input to UDP.
 
 class IceTcpDemultiplexer
 {
 public:
+	// Connection type determines the framing format
+	enum class ConnectionType : uint8_t
+	{
+		Unknown,    // Not yet determined
+		TurnRelay,  // TURN relay (uses Channel Data framing or raw STUN)
+		IceTcpDirect  // Direct ICE-TCP (uses RFC 4571 framing)
+	};
 
 	IceTcpDemultiplexer()
 	{
 		_buffer = std::make_shared<ov::Data>(65535);
+		_connection_type = ConnectionType::Unknown;
 	}
 
 	// In the case of a turn channel data message, it parses the header and stores the application data.
@@ -54,8 +65,16 @@ public:
 	bool IsAvailablePacket();
 	std::shared_ptr<IceTcpDemultiplexer::Packet> PopPacket();
 
+	// Set/Get connection type for proper framing handling
+	void SetConnectionType(ConnectionType type) { _connection_type = type; }
+	ConnectionType GetConnectionType() const { return _connection_type; }
+
+	// Check if this connection uses RFC 4571 framing (ICE-TCP Direct)
+	bool IsIceTcpDirect() const { return _connection_type == ConnectionType::IceTcpDirect; }
+
 private:
 	bool ParseData();
+	bool DetectConnectionType();
 
 	enum class ExtractResult : int8_t
 	{
@@ -68,7 +87,9 @@ private:
 	// -1 : error
 	ExtractResult ExtractStunMessage();
 	ExtractResult ExtractChannelMessage();
+	ExtractResult ExtractRfc4571Frame();  // New: for ICE-TCP Direct
 
 	std::shared_ptr<ov::Data> _buffer;
 	std::queue<std::shared_ptr<IceTcpDemultiplexer::Packet>> _packets;
+	ConnectionType _connection_type;
 };

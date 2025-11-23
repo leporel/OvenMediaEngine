@@ -14,6 +14,15 @@
 // ICE candidate structure:
 // [{"candidate":"candidate:0 1 UDP 50 192.168.0.183 10000 typ host generation 0","sdpMLineIndex":0,"sdpMid":"video"}]
 
+// TCP candidate types according to RFC 6544
+enum class TcpCandidateType : uint8_t
+{
+	None,      // For UDP candidates (no tcptype attribute)
+	Active,    // Will initiate outbound connections (port 9 in SDP)
+	Passive,   // Will accept incoming connections (real port in SDP)
+	So         // Simultaneous open
+};
+
 class IceCandidate
 {
 public:
@@ -98,6 +107,15 @@ public:
 	bool RemoveExtensionAttributes(const ov::String &key);
 	void RemoveAllExtensionAttributes();
 
+	// TCP candidate support (RFC 6544)
+	TcpCandidateType GetTcpType() const;
+	void SetTcpType(TcpCandidateType tcp_type);
+	bool IsTcp() const;
+
+	// Calculate priority according to RFC 5245/6544
+	static uint32_t CalculatePriority(uint32_t type_preference, uint32_t local_preference, uint32_t component_id);
+	static uint32_t CalculateTcpPriority(TcpCandidateType tcp_type, uint32_t local_preference, uint32_t component_id);
+
 	ov::String GetCandidateString() const noexcept;
 
 	virtual ov::String ToString() const noexcept;
@@ -128,5 +146,8 @@ protected:
 	uint16_t _rel_port;
 
 	std::map<ov::String, ov::String> _extension_attributes;
+
+	// TCP candidate type (RFC 6544)
+	TcpCandidateType _tcp_type = TcpCandidateType::None;
 };
 

@@ -173,6 +173,7 @@ private:
 
 	const std::shared_ptr<const ov::Data> CreateDataIndication(const ov::SocketAddress &peer_address, const std::shared_ptr<const ov::Data> &data);
 	const std::shared_ptr<const ov::Data> CreateChannelDataMessage(uint16_t channel_number, const std::shared_ptr<const ov::Data> &data);
+	const std::shared_ptr<const ov::Data> CreateRfc4571Frame(const std::shared_ptr<const ov::Data> &data);
 
 	// STUN negotiation order:
 	// (State: New)

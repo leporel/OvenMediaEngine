@@ -333,7 +333,24 @@ bool IcePortManager::GenerateIceCandidates(const cfg::bind::cmm::IceCandidates &
 
 			for (auto &address_map_item : address_map)
 			{
-				ice_candidates.emplace_back(protocol, address_map_item.first, 0, "");
+				RtcIceCandidate candidate(protocol, address_map_item.first, 0, "");
+
+				// For TCP candidates, set Passive type (server listens, client connects)
+				// and calculate priority according to RFC 6544
+				if (socket_type == ov::SocketType::Tcp)
+				{
+					candidate.SetTcpType(TcpCandidateType::Passive);
+					// Calculate TCP priority: type_pref=125 (slightly lower than UDP's 126)
+					// local_pref incorporates direction preference
+					uint32_t tcp_priority = IceCandidate::CalculateTcpPriority(
+						TcpCandidateType::Passive,
+						65535,  // max local preference
+						1       // component ID (RTP)
+					);
+					candidate.SetPriority(tcp_priority);
+				}
+
+				ice_candidates.emplace_back(std::move(candidate));
 			}
 		}
 

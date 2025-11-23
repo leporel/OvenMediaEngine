@@ -557,12 +557,12 @@ bool IcePort::Send(session_id_t session_id, const std::shared_ptr<const ov::Data
 
 	std::shared_ptr<const ov::Data> send_data = nullptr;
 
-	// Send throutgh TURN server Data Channel proxy
+	// Send through TURN server Data Channel proxy
 	if (ice_session->IsTurnClient() == true && ice_session->IsDataChannelEnabled() == true)
 	{
 		send_data = CreateChannelDataMessage(ice_session->GetDataChannelNumber(), data);
 	}
-	// Send thourgh TURN server Data Indication proxy
+	// Send through TURN server Data Indication proxy
 	else if (ice_session->IsTurnClient() == true && ice_session->IsDataChannelEnabled() == false)
 	{
 		send_data = CreateDataIndication(ice_session->GetTurnPeerAddress(), data);
@@ -585,6 +585,22 @@ bool IcePort::Send(session_id_t session_id, const std::shared_ptr<const ov::Data
 		return false;
 	}
 
+	// For ICE-TCP Direct connections, wrap data in RFC 4571 frame
+	if (remote->GetSocket().GetType() == ov::SocketType::Tcp && !ice_session->IsTurnClient())
+	{
+		std::shared_lock<std::shared_mutex> lock(_demultiplexers_lock);
+		auto it = _demultiplexers.find(remote->GetNativeHandle());
+		if (it != _demultiplexers.end() && it->second->IsIceTcpDirect())
+		{
+			send_data = CreateRfc4571Frame(send_data);
+			if (send_data == nullptr)
+			{
+				logte("IcePort::Send - Failed to create RFC 4571 frame");
+				return false;
+			}
+		}
+	}
+
 	// TODO(Getroot) : Change to use Local / Remote address of candidate pair
 	auto connected_candidate_pair = ice_session->GetConnectedCandidatePair();
 	if (connected_candidate_pair == nullptr)
@@ -597,18 +613,18 @@ bool IcePort::Send(session_id_t session_id, const std::shared_ptr<const ov::Data
 
 void IcePort::OnConnected(const std::shared_ptr<ov::Socket> &remote)
 {
-	// called when TURN client connected to the turn server with TCP
+	// Called when a TCP client connects (ICE-TCP direct or TURN relay)
 	auto demultiplexer = std::make_shared<IceTcpDemultiplexer>();
 
 	std::lock_guard<std::shared_mutex> lock_guard(_demultiplexers_lock);
 	_demultiplexers[remote->GetNativeHandle()] = demultiplexer;
 
-	logti("Turn client has connected : %s", remote->ToString().CStr());
+	logti("ICE/TCP client has connected : %s", remote->ToString().CStr());
 }
 
 void IcePort::OnDisconnected(const std::shared_ptr<ov::Socket> &remote, PhysicalPortDisconnectReason reason, const std::shared_ptr<const ov::Error> &error)
 {
-	// called when TURN client disconnected from the turn server with TCP
+	// Called when a TCP client disconnects (ICE-TCP direct or TURN relay)
 	std::lock_guard<std::shared_mutex> lock_guard(_demultiplexers_lock);
 
 	auto it = _demultiplexers.find(remote->GetNativeHandle());
@@ -617,7 +633,7 @@ void IcePort::OnDisconnected(const std::shared_ptr<ov::Socket> &remote, Physical
 		_demultiplexers.erase(remote->GetNativeHandle());
 	}
 
-	logti("Turn client has disconnected : %s", remote->ToString().CStr());
+	logti("ICE/TCP client has disconnected : %s", remote->ToString().CStr());
 }
 
 void IcePort::OnDataReceived(const std::shared_ptr<ov::Socket> &remote, const ov::SocketAddress &address, const std::shared_ptr<const ov::Data> &data)
@@ -1104,7 +1120,29 @@ bool IcePort::SendStunMessage(const std::shared_ptr<ov::Socket> &remote, const o
 
 	if (gate_info.input_method == IcePort::GateInfo::GateType::DIRECT)
 	{
-		send_data = source_data;
+		// Check if this is a TCP socket and if it's ICE-TCP Direct (needs RFC 4571 framing)
+		if (remote->GetSocket().GetType() == ov::SocketType::Tcp)
+		{
+			// Check if this connection uses RFC 4571 framing
+			std::shared_lock<std::shared_mutex> lock(_demultiplexers_lock);
+			auto it = _demultiplexers.find(remote->GetNativeHandle());
+			if (it != _demultiplexers.end() && it->second->IsIceTcpDirect())
+			{
+				// Add RFC 4571 framing (2-byte big-endian length prefix)
+				send_data = CreateRfc4571Frame(source_data);
+				logtd("Wrapping STUN message in RFC 4571 frame for ICE-TCP Direct");
+			}
+			else
+			{
+				// TURN relay over TCP - no RFC 4571 framing needed
+				send_data = source_data;
+			}
+		}
+		else
+		{
+			// UDP - no framing needed
+			send_data = source_data;
+		}
 	}
 	else if (gate_info.input_method == IcePort::GateInfo::GateType::SEND_INDICATION)
 	{
@@ -1151,6 +1189,36 @@ const std::shared_ptr<const ov::Data> IcePort::CreateChannelDataMessage(uint16_t
 {
 	ChannelDataMessage channel_data_message(channel_number, data);
 	return channel_data_message.GetPacket();
+}
+
+// Create RFC 4571 framed data (2-byte big-endian length prefix followed by payload)
+// Used for ICE-TCP Direct connections
+const std::shared_ptr<const ov::Data> IcePort::CreateRfc4571Frame(const std::shared_ptr<const ov::Data> &data)
+{
+	if (data == nullptr || data->GetLength() == 0)
+	{
+		return nullptr;
+	}
+
+	size_t payload_length = data->GetLength();
+	if (payload_length > 65535)
+	{
+		logte("RFC 4571: Payload too large: %zu bytes", payload_length);
+		return nullptr;
+	}
+
+	// Create frame: 2-byte length prefix + payload
+	auto frame = std::make_shared<ov::Data>(2 + payload_length);
+
+	// Write 2-byte big-endian length
+	uint8_t length_header[2];
+	length_header[0] = static_cast<uint8_t>((payload_length >> 8) & 0xFF);
+	length_header[1] = static_cast<uint8_t>(payload_length & 0xFF);
+
+	frame->Append(length_header, 2);
+	frame->Append(data);
+
+	return frame;
 }
 
 bool IcePort::OnReceivedTurnAllocateRequest(const std::shared_ptr<ov::Socket> &remote, const ov::SocketAddressPair &address_pair, GateInfo &gate_info, const StunMessage &message)
